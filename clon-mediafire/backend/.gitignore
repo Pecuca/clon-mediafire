@@ -1,0 +1,35 @@
+# Node modules
+node_modules/
+
+src/test/
+
+# Build output
+dist/
+coverage/
+
+docker-compose.yml
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# Uploads and runtime files
+uploads/
+keys/
+
+# Editor settings
+.vscode/
+.idea/
+
+# Misc
+.DS_Store
+*.tgz
+
