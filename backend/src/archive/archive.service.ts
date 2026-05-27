@@ -320,12 +320,34 @@ export class ArchiveService {
     return saved;
   }
 
+  // ── Proporciona la llave pública RSA del archivo para que el cliente
+  //    pueda cifrar su llave AES antes de solicitar la descarga.
+  async getDownloadPublicKey(archiveId: number, userId: number): Promise<string> {
+    const archive = await this.archiveRepo.findOne({
+      where: { archive_id: archiveId },
+      relations: ['directory'],
+    });
+    if (!archive) throw new NotFoundException('Archive not found');
+
+    const ownedByDirectory = archive.directory?.user_id === userId;
+    const ownedDirectly = archive.user_id === userId;
+    if (!ownedByDirectory && !ownedDirectly && !archive.is_public) {
+      throw new ForbiddenException('This file is private');
+    }
+
+    // Derivar la llave pública a partir de la llave privada almacenada
+    const privateKey = this.getArchivePrivateKey(archive);
+    const keyObject = crypto.createPrivateKey(privateKey);
+    const pubKeyObject = crypto.createPublicKey(keyObject);
+    return pubKeyObject.export({ type: 'spki', format: 'pem' }) as string;
+  }
+
   async downloadFile(
     userId: number,
     archiveId: number,
+    clientAesKeyEncrypted: string,
     ip?: string | null,
   ) {
-    // Find the archive — may be owned or public
     const archive = await this.archiveRepo.findOne({
       where: { archive_id: archiveId },
       relations: ['directory'],
@@ -340,11 +362,7 @@ export class ArchiveService {
       throw new ForbiddenException('This file is private');
     }
 
-    return this.getEncryptedArchivePayload(
-      archive,
-      userId,
-      ip,
-    );
+    return this.getEncryptedArchivePayload(archive, clientAesKeyEncrypted, userId, ip);
   }
 
   async listUserFiles(userId: number, directoryId?: number | null) {
@@ -396,18 +414,16 @@ export class ArchiveService {
 
   async downloadFileByToken(
     token: string,
+    clientAesKeyEncrypted: string,
     ip?: string | null,
   ) {
     const archive = await this.getSharedArchive(token);
-    return this.getEncryptedArchivePayload(
-      archive,
-      null,
-      ip,
-    );
+    return this.getEncryptedArchivePayload(archive, clientAesKeyEncrypted, null, ip);
   }
 
   private async getEncryptedArchivePayload(
     archive: Archive,
+    clientAesKeyEncrypted: string,
     actorUserId?: number | null,
     ip?: string | null,
   ) {
@@ -418,16 +434,47 @@ export class ArchiveService {
     const encryptedBuffer = fs.readFileSync(archive.file_path);
     const archivePrivateKey = this.getArchivePrivateKey(archive);
 
-    const decryptedSymmetricPayload =
+    // ── Paso 1: Descifrar la llave AES del cliente (viene cifrada con RSA del archivo)
+    let clientAesPayload: { key: string; iv: string };
+    try {
+      const clientAesKeyJson = this.decryptWithPrivateKey(clientAesKeyEncrypted, archivePrivateKey);
+      clientAesPayload = JSON.parse(clientAesKeyJson) as { key: string; iv: string };
+      if (!clientAesPayload.key || !clientAesPayload.iv) throw new Error('Payload incompleto');
+    } catch {
+      throw new BadRequestException('No se pudo descifrar la llave AES del cliente');
+    }
+
+    // ── Paso 2: Descifrar la llave simétrica almacenada (con la llave privada del archivo)
+    const decryptedSymmetricStr =
       this.tryDecryptStoredValue(archive.symmetric_key, archivePrivateKey) ??
       archive.symmetric_key;
+    const symmetricPayload = this.parseStoredSymmetricPayload(decryptedSymmetricStr);
 
-    const plainHash =
-      this.tryDecryptStoredValue(archive.hash, archivePrivateKey) ??
-      archive.hash;
+    // ── Paso 3: Descifrar el archivo almacenado (.enc) con la llave simétrica
+    const decipher = crypto.createDecipheriv(
+      'aes-256-gcm',
+      Buffer.from(symmetricPayload.key, 'hex'),
+      Buffer.from(symmetricPayload.iv, 'hex'),
+    );
+    decipher.setAuthTag(Buffer.from(symmetricPayload.authTag, 'hex'));
+    let plainBuffer: Buffer;
+    try {
+      plainBuffer = Buffer.concat([decipher.update(encryptedBuffer), decipher.final()]);
+    } catch {
+      throw new BadRequestException('Fallo al descifrar el archivo almacenado');
+    }
 
-    const symmetricPayloadBase64 = Buffer.from(decryptedSymmetricPayload, 'utf8').toString('base64');
-    const hashBase64 = Buffer.from(plainHash, 'utf8').toString('base64');
+    // ── Paso 4: Calcular SHA-256 del plaintext para verificación de integridad
+    const plainHash = crypto.createHash('sha256').update(plainBuffer).digest('hex');
+
+    // ── Paso 5: Re-cifrar el plaintext con la llave AES del cliente
+    const clientIv = Buffer.from(clientAesPayload.iv, 'hex');
+    const clientKey = Buffer.from(clientAesPayload.key, 'hex');
+    const cipher = crypto.createCipheriv('aes-256-gcm', clientKey, clientIv);
+    const reEncrypted = Buffer.concat([cipher.update(plainBuffer), cipher.final()]);
+    const authTag = cipher.getAuthTag();
+    // Concatenar ciphertext + authTag al final (el cliente separa los últimos 16 bytes)
+    const reEncryptedWithTag = Buffer.concat([reEncrypted, authTag]);
 
     try {
       await this.registerRepo.save({
@@ -445,10 +492,9 @@ export class ArchiveService {
     }
 
     return {
-      buffer: encryptedBuffer,
+      buffer: reEncryptedWithTag,
       filename: archive.archive_na,
-      fileAuthTag: symmetricPayloadBase64,
-      encryptedHashHeader: hashBase64,
+      hash: plainHash,  // hash del plaintext en hex, para que el cliente verifique integridad
     };
   }
 

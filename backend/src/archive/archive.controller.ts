@@ -67,43 +67,62 @@ export class ArchiveController {
 
 
 
+  // ── Download init: devuelve la llave pública RSA del archivo ────────────
+  // DEBE estar antes de download/:id para evitar conflictos de routing
+  @UseGuards(AuthGuard)
+  @Get('download-init/:id')
+  async downloadInit(@Param('id') id: string, @Req() req: Request) {
+    const userId = Number((req.session as any).user.user_id);
+    const archiveId = Number(id);
+    const publicKey = await this.archiveService.getDownloadPublicKey(archiveId, userId);
+    return { publicKey };
+  }
+
+  // DEBE estar antes de download/:id para que 'shared' no se trate como :id
+  @Get('download/shared/:token')
+  async downloadSharedFile(
+    @Param('token') token: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const ip = (req.headers['x-forwarded-for'] as string) || req.ip || null;
+    const clientAesKeyEncrypted = req.headers['x-client-aes-key'] as string;
+    if (!clientAesKeyEncrypted) {
+      throw new BadRequestException('El header x-client-aes-key es obligatorio');
+    }
+
+    const { buffer, filename, hash } = await this.archiveService.downloadFileByToken(token, clientAesKeyEncrypted, ip);
+
+    const safeName = encodeURIComponent(filename).replace(/'/g, '%27');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"; filename*=UTF-8''${safeName}`);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('x-file-hash', hash);
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, x-file-hash');
+    res.send(buffer);
+  }
+
   @UseGuards(AuthGuard)
   @Get('download/:id')
   async downloadFile(
     @Param('id') id: string,
     @Req() req: Request,
-    @Res() res: Response
+    @Res() res: Response,
   ) {
     const userId = Number((req.session as any).user.user_id);
     const archiveId = Number(id);
     const ip = (req.headers['x-forwarded-for'] as string) || req.ip || null;
-    const { buffer, filename, fileAuthTag, encryptedHashHeader } = await this.archiveService.downloadFile(userId, archiveId, ip);
+    const clientAesKeyEncrypted = req.headers['x-client-aes-key'] as string;
+    if (!clientAesKeyEncrypted) {
+      throw new BadRequestException('El header x-client-aes-key es obligatorio');
+    }
 
-    const safeName = encodeURIComponent(filename).replace(/'/g, '%27');
-
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"; filename*=UTF-8''${safeName}`);
-    res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('x-file-auth-tag', fileAuthTag);
-    res.setHeader('x-file-hash', encryptedHashHeader);
-    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, x-file-auth-tag, x-file-hash');
-    res.send(buffer);
-  }
-
-  @Get('download/shared/:token')
-  async downloadSharedFile(
-    @Param('token') token: string, 
-    @Req() req: Request, 
-    @Res() res: Response) {
-    const ip = (req.headers['x-forwarded-for'] as string) || req.ip || null;
-
-    const { buffer, filename, fileAuthTag, encryptedHashHeader } = await this.archiveService.downloadFileByToken(token, ip);
+    const { buffer, filename, hash } = await this.archiveService.downloadFile(userId, archiveId, clientAesKeyEncrypted, ip);
 
     const safeName = encodeURIComponent(filename).replace(/'/g, '%27');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"; filename*=UTF-8''${safeName}`);
     res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('x-file-auth-tag', fileAuthTag);
-    res.setHeader('x-file-hash', encryptedHashHeader);
-    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, x-file-auth-tag, x-file-hash');
+    res.setHeader('x-file-hash', hash);
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, x-file-hash');
     res.send(buffer);
   }
 

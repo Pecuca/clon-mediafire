@@ -1,24 +1,23 @@
 // ╔══════════════════════════════════════════════════════════════╗
 // ║  crypto/crypto_service.dart                                  ║
 // ║                                                              ║
-// ║  Esta es la parte más importante del proyecto.               ║
-// ║  Implementa el mismo protocolo criptográfico que api.ts,     ║
-// ║  pero en Dart usando la librería pointycastle.              ║
-// ║                                                              ║
 // ║  PROTOCOLO DE SUBIDA (Upload):                               ║
 // ║    1. Generar AES-256-GCM key + IV aleatório                ║
 // ║    2. Encriptar el archivo con AES-GCM                      ║
-// ║    3. Calcular SHA-256 del plaintext (para verificar integ.) ║
+// ║    3. Calcular SHA-256 del plaintext                        ║
 // ║    4. Encriptar {key,iv,authTag} con RSA-OAEP del servidor  ║
-// ║    5. Encriptar el hash SHA-256 con RSA-OAEP                ║
+// ║    5. Encriptar el hash SHA-256 con RSA-OAEP               ║
 // ║                                                              ║
 // ║  PROTOCOLO DE DESCARGA (Download):                           ║
-// ║    1. Generar par RSA del cliente                            ║
-// ║    2. El servidor encripta la AES key con la llave PÚBLICA  ║
-// ║       del cliente                                            ║
-// ║    3. Desencriptamos con nuestra llave PRIVADA              ║
-// ║    4. Desencriptamos el archivo con AES-GCM                 ║
-// ║    5. Verificamos SHA-256 para garantizar integridad         ║
+// ║    1. Llamar GET /file/download-init/:id                    ║
+// ║       → servidor devuelve llave pública RSA del archivo     ║
+// ║    2. Generar llave AES del cliente (key + iv aleatorios)   ║
+// ║    3. Cifrar {key, iv} con RSA-OAEP del servidor            ║
+// ║    4. GET /file/download/:id con header x-client-aes-key    ║
+// ║    5. Servidor descifra la llave AES del cliente con su RSA ║
+// ║    6. Servidor re-cifra el archivo con esa llave AES        ║
+// ║    7. Descifrar respuesta con nuestra llave AES local       ║
+// ║    8. Verificar SHA-256 del header x-file-hash              ║
 // ╚══════════════════════════════════════════════════════════════╝
 
 import 'dart:convert';
@@ -47,7 +46,7 @@ class EncryptedUploadPayload {
   });
 }
 
-/// Par de llaves RSA del cliente para descifrar la respuesta del servidor
+/// Par de llaves RSA del cliente (disponible si se necesita en el futuro)
 class ClientKeyPair {
   final RSAPrivateKey privateKey;
   final String publicKeyBase64; // Llave pública en formato Base64 SPKI
@@ -56,6 +55,16 @@ class ClientKeyPair {
     required this.privateKey,
     required this.publicKeyBase64,
   });
+}
+
+/// Llave AES generada por el cliente para el protocolo de descarga.
+/// El cliente genera esta llave, la cifra con RSA-OAEP del servidor y
+/// el servidor re-cifra el archivo con ella antes de enviarlo.
+class ClientAesKey {
+  final Uint8List key; // 32 bytes aleatorios (AES-256)
+  final Uint8List iv;  // 16 bytes aleatorios
+
+  const ClientAesKey({required this.key, required this.iv});
 }
 
 /// Payload simétrico: la información para descifrar el archivo
@@ -152,11 +161,12 @@ class CryptoService {
     // Procesar: el output incluye cipherText + authTag concatenados
     final outputWithTag = Uint8List(cipher.getOutputSize(plaintext.length));
     final len = cipher.processBytes(plaintext, 0, plaintext.length, outputWithTag, 0);
-    cipher.doFinal(outputWithTag, len);
+    final len2 = cipher.doFinal(outputWithTag, len);
+    final totalLen = len + len2;
 
     // Separar cipherText y authTag (el tag ocupa los últimos 16 bytes)
-    final cipherText = outputWithTag.sublist(0, outputWithTag.length - 16);
-    final authTag = outputWithTag.sublist(outputWithTag.length - 16);
+    final cipherText = outputWithTag.sublist(0, totalLen - 16);
+    final authTag = outputWithTag.sublist(totalLen - 16, totalLen);
 
     return (cipherText: cipherText, authTag: authTag, key: key, iv: iv);
   }
@@ -187,9 +197,9 @@ class CryptoService {
 
     final output = Uint8List(cipher.getOutputSize(combined.length));
     final len = cipher.processBytes(combined, 0, combined.length, output, 0);
-    cipher.doFinal(output, len);
+    final len2 = cipher.doFinal(output, len);
 
-    return output;
+    return output.sublist(0, len + len2);
   }
 
   // ── RSA-OAEP ─────────────────────────────────────────────────────────────
@@ -256,7 +266,6 @@ class CryptoService {
   }
 
   /// Desencripta datos con RSA-OAEP usando la llave privada del cliente.
-  /// Equivale a decryptHeaderPayload() en api.ts.
   String rsaOaepDecrypt(RSAPrivateKey privateKey, String encryptedBase64) {
     final cipher = OAEPEncoding.withSHA256(RSAEngine());
     cipher.init(false, PrivateKeyParameter<RSAPrivateKey>(privateKey));
@@ -264,6 +273,29 @@ class CryptoService {
     final encryptedBytes = base64.decode(encryptedBase64);
     final decrypted = cipher.process(Uint8List.fromList(encryptedBytes));
     return utf8.decode(decrypted);
+  }
+
+  // ── Llave AES del cliente (protocolo de descarga) ────────────────────────
+
+  /// Genera una llave AES-256 + IV aleatorios para el protocolo de descarga.
+  /// El cliente la genera antes de pedir el archivo, la cifra con RSA-OAEP
+  /// del servidor y la envía en el header x-client-aes-key.
+  ClientAesKey generateClientAesKey() {
+    return ClientAesKey(
+      key: _randomBytes(32), // AES-256
+      iv: _randomBytes(16),
+    );
+  }
+
+  /// Cifra la llave AES del cliente con la llave pública RSA del servidor.
+  /// Devuelve el resultado en Base64 para enviarlo en el header x-client-aes-key.
+  String encryptClientAesKeyForServer(String serverPemKey, ClientAesKey clientKey) {
+    final serverPublicKey = importPublicKeyFromPem(serverPemKey);
+    final payload = jsonEncode({
+      'key': _bytesToHex(clientKey.key),
+      'iv': _bytesToHex(clientKey.iv),
+    });
+    return rsaOaepEncrypt(serverPublicKey, payload);
   }
 
   // ── API de alto nivel: preparar upload ───────────────────────────────────
@@ -306,41 +338,43 @@ class CryptoService {
     );
   }
 
-  // ── API de alto nivel: desencriptar descarga ──────────────────────────────
+  // ── API de alto nivel: desencriptar descarga ───────────────────────────────
 
   /// Desencripta y verifica un archivo descargado del servidor.
   ///
-  /// Parámetros:
-  ///   cipherText           — cuerpo de la respuesta (archivo encriptado)
-  ///   symPayloadB64        — header x-file-auth-tag (base64 json)
-  ///   hashB64              — header x-file-hash (base64)
+  /// El servidor re-cifró el archivo con [clientKey] y [clientIv] —
+  /// ambos son los que el cliente generó y envió cifrados al servidor.
   ///
-  /// Retorna los bytes del archivo original.
+  /// Parámetros:
+  ///   cipherTextWithTag  — cuerpo completo de la respuesta (cipherText + authTag)
+  ///                         Los últimos 16 bytes son el authTag GCM.
+  ///   clientKey          — llave AES-256 generada por el cliente
+  ///   clientIv           — IV generado por el cliente
+  ///   expectedHash       — SHA-256 hex del plaintext (header x-file-hash)
+  ///
+  /// Retorna los bytes del archivo original desencriptado.
   Uint8List decryptDownload({
-    required Uint8List cipherText,
-    required String symPayloadB64,
-    required String hashB64,
+    required Uint8List cipherTextWithTag,
+    required Uint8List clientKey,
+    required Uint8List clientIv,
+    required String expectedHash,
   }) {
-    // Decodificar el payload simétrico
-    final symPayloadBytes = base64.decode(symPayloadB64);
-    final symPayloadJson = utf8.decode(symPayloadBytes);
-    final symPayload = SymmetricPayload.fromJson(
-      jsonDecode(symPayloadJson) as Map<String, dynamic>,
-    );
+    // Separar cipherText y authTag (el servidor concatena los últimos 16 bytes como tag)
+    if (cipherTextWithTag.length < 16) {
+      throw Exception('Respuesta del servidor demasiado corta');
+    }
+    final authTag = cipherTextWithTag.sublist(cipherTextWithTag.length - 16);
+    final cipherText = cipherTextWithTag.sublist(0, cipherTextWithTag.length - 16);
 
-    // Decodificar el hash
-    final expectedHashBytes = base64.decode(hashB64);
-    final expectedHash = utf8.decode(expectedHashBytes);
-
-    // Desencriptar el archivo con AES-GCM
+    // Desencriptar con la llave AES del cliente
     final plainBytes = aesGcmDecrypt(
       cipherText: cipherText,
-      authTag: _hexToBytes(symPayload.authTag),
-      key: _hexToBytes(symPayload.key),
-      iv: _hexToBytes(symPayload.iv),
+      authTag: authTag,
+      key: clientKey,
+      iv: clientIv,
     );
 
-    // Verificar integridad: SHA-256 del plaintext debe coincidir
+    // Verificar integridad: SHA-256 del plaintext debe coincidir con el header
     final actualHash = sha256Hex(plainBytes);
     if (actualHash != expectedHash.toLowerCase()) {
       throw Exception('Integridad comprometida: hash no coincide');
