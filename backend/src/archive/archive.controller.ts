@@ -65,36 +65,19 @@ export class ArchiveController {
     };
   }
 
-  @UseGuards(AuthGuard)
-  @Get('download/:id/init')
-  async initDownload(@Param('id') id: string, @Req() req: Request) {
-    const userId = Number((req.session as any).user.user_id);
-    const archiveId = Number(id);
-    const publicKey = await this.archiveService.getFilePublicKey(archiveId, userId);
-    return { publicKey };
-  }
 
-  @Get('download/shared/:token/init')
-  async initSharedDownload(@Param('token') token: string) {
-    const publicKey = await this.archiveService.getSharedFilePublicKey(token);
-    return { publicKey };
-  }
 
   @UseGuards(AuthGuard)
-  @Post('download/:id')
+  @Get('download/:id')
   async downloadFile(
     @Param('id') id: string,
-    @Body('encryptedClientSymmetricKey') encryptedClientSymmetricKey: string,
     @Req() req: Request,
     @Res() res: Response
   ) {
     const userId = Number((req.session as any).user.user_id);
     const archiveId = Number(id);
     const ip = (req.headers['x-forwarded-for'] as string) || req.ip || null;
-    if (!encryptedClientSymmetricKey) {
-      throw new BadRequestException('encryptedClientSymmetricKey is required in the body');
-    }
-    const { buffer, filename, fileAuthTag, encryptedHashHeader } = await this.archiveService.downloadFile(userId, archiveId, encryptedClientSymmetricKey, ip);
+    const { buffer, filename, fileAuthTag, encryptedHashHeader } = await this.archiveService.downloadFile(userId, archiveId, ip);
 
     const safeName = encodeURIComponent(filename).replace(/'/g, '%27');
 
@@ -106,19 +89,14 @@ export class ArchiveController {
     res.send(buffer);
   }
 
-  @Post('download/shared/:token')
+  @Get('download/shared/:token')
   async downloadSharedFile(
     @Param('token') token: string, 
-    @Body('encryptedClientSymmetricKey') encryptedClientSymmetricKey: string,
     @Req() req: Request, 
     @Res() res: Response) {
     const ip = (req.headers['x-forwarded-for'] as string) || req.ip || null;
-    
-    if (!encryptedClientSymmetricKey) {
-      throw new BadRequestException('encryptedClientSymmetricKey is required in the body');
-    }
 
-    const { buffer, filename, fileAuthTag, encryptedHashHeader } = await this.archiveService.downloadFileByToken(token, encryptedClientSymmetricKey, ip);
+    const { buffer, filename, fileAuthTag, encryptedHashHeader } = await this.archiveService.downloadFileByToken(token, ip);
 
     const safeName = encodeURIComponent(filename).replace(/'/g, '%27');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"; filename*=UTF-8''${safeName}`);

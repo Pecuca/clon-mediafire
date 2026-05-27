@@ -103,24 +103,18 @@ class FileApi {
   // ── Descargar archivo (con criptografía) ─────────────────────────────────
 
   /// Descarga y desencripta un archivo.
-  /// Equivale a downloadBlob() en api.ts.
   ///
   /// Pasos:
-  ///   1. Generar par RSA del cliente
-  ///   2. GET /file/download/:id con llave pública del cliente en header
-  ///   3. Desencriptar AES key y hash con llave privada del cliente
-  ///   4. Desencriptar el cuerpo con AES-GCM
-  ///   5. Verificar SHA-256
-  ///   6. Guardar en carpeta de Descargas
+  ///   1. GET /file/download/:id
+  ///   2. Extraer llave simétrica y hash (base64) de los headers
+  ///   3. Desencriptar el cuerpo con AES-GCM
+  ///   4. Verificar SHA-256
+  ///   5. Guardar en carpeta de Descargas
   Future<String> download(String archiveId) async {
-    // Paso 1: Generar par RSA del cliente
-    final keyPair = _crypto.generateClientKeyPair();
-
-    // Paso 2: Descargar como bytes con headers criptográficos
+    // Paso 1: Descargar como bytes
     final res = await _client.dio.get<List<int>>(
       '/file/download/$archiveId',
       options: Options(
-        headers: {'x-client-public-key': keyPair.publicKeyBase64},
         responseType: ResponseType.bytes,
         validateStatus: (_) => true,
       ),
@@ -130,10 +124,10 @@ class FileApi {
       throw ApiError('Error al descargar archivo', res.statusCode ?? 500);
     }
 
-    // Extraer headers criptográficos
-    final encSymKey = res.headers.value('x-crypto-symmetric-key');
-    final encHash = res.headers.value('x-file-hash');
-    if (encSymKey == null || encHash == null) {
+    // Paso 2: Extraer headers
+    final symPayloadB64 = res.headers.value('x-file-auth-tag');
+    final hashB64 = res.headers.value('x-file-hash');
+    if (symPayloadB64 == null || hashB64 == null) {
       throw ApiError('Faltan headers criptográficos', 500);
     }
 
@@ -141,15 +135,14 @@ class FileApi {
     final disposition = res.headers.value('content-disposition') ?? '';
     final filename = _extractFilename(disposition);
 
-    // Pasos 3-5: Desencriptar y verificar integridad
+    // Pasos 3-4: Desencriptar y verificar integridad
     final plainBytes = _crypto.decryptDownload(
       cipherText: Uint8List.fromList(res.data!),
-      encryptedSymKeyB64: encSymKey,
-      encryptedHashB64: encHash,
-      clientPrivateKey: keyPair.privateKey,
+      symPayloadB64: symPayloadB64,
+      hashB64: hashB64,
     );
 
-    // Paso 6: Guardar en la carpeta de Descargas del usuario
+    // Paso 5: Guardar en la carpeta de Descargas del usuario
     final downloadsDir = await getDownloadsDirectory() ??
         await getApplicationDocumentsDirectory();
     final outFile = File(p.join(downloadsDir.path, filename));

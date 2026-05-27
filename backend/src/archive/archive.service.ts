@@ -323,7 +323,6 @@ export class ArchiveService {
   async downloadFile(
     userId: number,
     archiveId: number,
-    clientPublicKeyBase64: string,
     ip?: string | null,
   ) {
     // Find the archive — may be owned or public
@@ -343,7 +342,6 @@ export class ArchiveService {
 
     return this.getEncryptedArchivePayload(
       archive,
-      clientPublicKeyBase64,
       userId,
       ip,
     );
@@ -398,13 +396,11 @@ export class ArchiveService {
 
   async downloadFileByToken(
     token: string,
-    clientPublicKeyBase64: string,
     ip?: string | null,
   ) {
     const archive = await this.getSharedArchive(token);
     return this.getEncryptedArchivePayload(
       archive,
-      clientPublicKeyBase64,
       null,
       ip,
     );
@@ -412,7 +408,6 @@ export class ArchiveService {
 
   private async getEncryptedArchivePayload(
     archive: Archive,
-    clientPublicKeyBase64: string,
     actorUserId?: number | null,
     ip?: string | null,
   ) {
@@ -421,25 +416,18 @@ export class ArchiveService {
     }
 
     const encryptedBuffer = fs.readFileSync(archive.file_path);
-    const clientPublicKey = this.parseClientPublicKey(clientPublicKeyBase64);
     const archivePrivateKey = this.getArchivePrivateKey(archive);
 
     const decryptedSymmetricPayload =
       this.tryDecryptStoredValue(archive.symmetric_key, archivePrivateKey) ??
       archive.symmetric_key;
-    const symmetricPayload = this.parseStoredSymmetricPayload(
-      decryptedSymmetricPayload,
-    );
 
     const plainHash =
       this.tryDecryptStoredValue(archive.hash, archivePrivateKey) ??
       archive.hash;
 
-    const encryptedSymmetricKey = this.encryptWithPublicKey(
-      JSON.stringify(symmetricPayload),
-      clientPublicKey,
-    );
-    const encryptedHash = this.encryptWithPublicKey(plainHash, clientPublicKey);
+    const symmetricPayloadBase64 = Buffer.from(decryptedSymmetricPayload, 'utf8').toString('base64');
+    const hashBase64 = Buffer.from(plainHash, 'utf8').toString('base64');
 
     try {
       await this.registerRepo.save({
@@ -459,41 +447,12 @@ export class ArchiveService {
     return {
       buffer: encryptedBuffer,
       filename: archive.archive_na,
-      encryptedSymmetricKey,
-      encryptedHash,
-      // Aliases expected by the controller
-      fileAuthTag: encryptedSymmetricKey,
-      encryptedHashHeader: encryptedHash,
+      fileAuthTag: symmetricPayloadBase64,
+      encryptedHashHeader: hashBase64,
     };
   }
 
-  // ── Public-key helpers used by download init endpoints ──────────────────
-
-  async getFilePublicKey(archiveId: number, userId: number): Promise<string> {
-    const archive = await this.archiveRepo.findOne({
-      where: { archive_id: archiveId },
-      relations: ['directory'],
-    });
-    if (!archive) throw new NotFoundException('Archive not found');
-
-    const ownedByDirectory = archive.directory?.user_id === userId;
-    const ownedDirectly = archive.user_id === userId;
-    if (!ownedByDirectory && !ownedDirectly && !archive.is_public) {
-      throw new ForbiddenException('This file is private');
-    }
-
-    // Derive the public key from the stored private key
-    const privateKey = this.getArchivePrivateKey(archive);
-    const keyObject = crypto.createPrivateKey(privateKey);
-    return keyObject.export({ type: 'spki', format: 'pem' }) as string;
-  }
-
-  async getSharedFilePublicKey(token: string): Promise<string> {
-    const archive = await this.getSharedArchive(token);
-    const privateKey = this.getArchivePrivateKey(archive);
-    const keyObject = crypto.createPrivateKey(privateKey);
-    return keyObject.export({ type: 'spki', format: 'pem' }) as string;
-  }
+  // ── Helpers ──────────────────
 
   async changeVisibility(userId: number, archiveId: number, isPublic: boolean) {
     const archive = await this.getOwnedArchive(userId, archiveId);

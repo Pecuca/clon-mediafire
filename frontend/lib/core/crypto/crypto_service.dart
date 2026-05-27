@@ -309,29 +309,28 @@ class CryptoService {
   // ── API de alto nivel: desencriptar descarga ──────────────────────────────
 
   /// Desencripta y verifica un archivo descargado del servidor.
-  /// Orquesta los pasos 3-5 del protocolo de descarga.
   ///
   /// Parámetros:
   ///   cipherText           — cuerpo de la respuesta (archivo encriptado)
-  ///   encryptedSymKeyB64   — header x-crypto-symmetric-key
-  ///   encryptedHashB64     — header x-file-hash
-  ///   clientPrivateKey     — llave privada RSA del cliente
+  ///   symPayloadB64        — header x-file-auth-tag (base64 json)
+  ///   hashB64              — header x-file-hash (base64)
   ///
   /// Retorna los bytes del archivo original.
   Uint8List decryptDownload({
     required Uint8List cipherText,
-    required String encryptedSymKeyB64,
-    required String encryptedHashB64,
-    required RSAPrivateKey clientPrivateKey,
+    required String symPayloadB64,
+    required String hashB64,
   }) {
-    // Desencriptar el payload simétrico con la llave privada del cliente
-    final symPayloadJson = rsaOaepDecrypt(clientPrivateKey, encryptedSymKeyB64);
+    // Decodificar el payload simétrico
+    final symPayloadBytes = base64.decode(symPayloadB64);
+    final symPayloadJson = utf8.decode(symPayloadBytes);
     final symPayload = SymmetricPayload.fromJson(
       jsonDecode(symPayloadJson) as Map<String, dynamic>,
     );
 
-    // Desencriptar el hash
-    final expectedHash = rsaOaepDecrypt(clientPrivateKey, encryptedHashB64);
+    // Decodificar el hash
+    final expectedHashBytes = base64.decode(hashB64);
+    final expectedHash = utf8.decode(expectedHashBytes);
 
     // Desencriptar el archivo con AES-GCM
     final plainBytes = aesGcmDecrypt(
