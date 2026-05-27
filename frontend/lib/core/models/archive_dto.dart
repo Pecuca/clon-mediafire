@@ -29,13 +29,13 @@ class ArchiveDto {
 
   factory ArchiveDto.fromJson(Map<String, dynamic> json) {
     return ArchiveDto(
-      archiveId: json['archive_id'] as String,
-      archiveName: json['archive_na'] as String,
-      hash: json['hash'] as String? ?? '',
+      archiveId: json['archive_id']?.toString() ?? '',
+      archiveName: json['archive_na']?.toString() ?? '',
+      hash: json['hash']?.toString() ?? '',
       isPublic: json['is_public'] as bool? ?? false,
-      userId: json['user_id'] as String,
-      directoryId: json['directory_id'] as String?,
-      shareToken: json['share_token'] as String?,
+      userId: json['user_id']?.toString() ?? '',
+      directoryId: json['directory_id']?.toString(),
+      shareToken: json['share_token']?.toString(),
     );
   }
 

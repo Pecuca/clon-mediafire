@@ -22,9 +22,9 @@ class DirectoryDto {
 
   factory DirectoryDto.fromJson(Map<String, dynamic> json) {
     return DirectoryDto(
-      directoryId: json['directory_id'] as String,
-      directoryName: json['directory_name'] as String,
-      userId: json['user_id'] as String,
+      directoryId: json['directory_id']?.toString() ?? '',
+      directoryName: json['directory_name']?.toString() ?? '',
+      userId: json['user_id']?.toString() ?? '',
     );
   }
 

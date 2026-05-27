@@ -27,10 +27,10 @@ class UserDto {
   /// a un objeto UserDto. Equivale a JSON.parse() en JavaScript.
   factory UserDto.fromJson(Map<String, dynamic> json) {
     return UserDto(
-      userId: json['user_id'].toString(),
-      userName: json['user_na'] as String,
-      userMail: json['user_mail'] as String,
-      publicKey: json['public_key'] as String?,
+      userId: json['user_id']?.toString() ?? '',
+      userName: json['user_na']?.toString() ?? '',
+      userMail: json['user_mail']?.toString() ?? '',
+      publicKey: json['public_key']?.toString(),
     );
   }
 }
